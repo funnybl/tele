@@ -2,7 +2,7 @@
 
 every tele patch, grouped by the release that brought it, newest first. [features](features.md) has the same rows grouped by settings page. release notes and the in-app what's new are made from these rows, so their format is strict: see [the patch row](development.md#the-patch-row).
 
-all 343 patches, newest release first.
+all 344 patches, newest release first.
 
 ### [tele 21](https://github.com/nitreojs/tele/releases/tag/v7.3.1-tele.21)
 
@@ -11,6 +11,7 @@ all 343 patches, newest release first.
 | [334](../patches/tdesktop/0334-feat-ask-before-scripts-change-how-messages-and-peop.patch) | scripts need the new display grant, which tele asks you about, before they change how messages, people and chats look or show messages that were never sent, so a script can't quietly make a message say something it doesn't | with 312 |
 | [335](../patches/tdesktop/0335-feat-web-platform-workers-files-sound-webviews-stori.patch) | scripts get the web platform (urls, abort signals, structured clone, intl, websockets, workers, full webcrypto, compression and images), a file area of their own, sounds, webview panels, npm packages, stories, gifts and stars, tele's own data, video chats, the media viewer, banners, selection, compose state, search providers, sticker and gif panels, mini apps, inline answers and buttons under messages. scripts installed from a link check for updates, and gettele.app has a catalog of scripts | with 312 |
 | [336](../patches/tdesktop/0336-fix-script-webviews-only-navigate-inside-their-own-p.patch) | a script's webview panel can't navigate away from its own page, so it can't hand what you type in it to another app | with 312 |
+| [337](../patches/tdesktop/0337-fix-scripts-appear-as-soon-as-they-are-added-aligned.patch) | scripts you add to, remove from or rename in the scripts folder show up in the scripts manager within seconds, without restarting tele, and its ⋮ menu can rescan the folder. script items in the media viewer's menu line up with the others | with 312 |
 
 ### [tele 20](https://github.com/nitreojs/tele/releases/tag/v7.3.1-tele.20)
 

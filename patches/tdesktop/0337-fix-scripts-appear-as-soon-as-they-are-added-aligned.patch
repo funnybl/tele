@@ -1,0 +1,219 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: nitreojs <hello@starkow.dev>
+Date: Mon, 12 Oct 2026 19:36:32 +0300
+Subject: [PATCH] fix: scripts appear as soon as they are added, aligned viewer
+ menu items and the default sound read as default
+
+---
+ .../tele/scripting/tele_script_hooks.cpp      | 41 ++++++++++++++++++-
+ .../tele/scripting/tele_script_hooks.h        |  1 +
+ .../tele/scripting/tele_script_manager.cpp    |  5 +++
+ .../scripting/tele_script_mediaviewer.cpp     |  3 +-
+ .../tele/scripting/tele_script_sound.cpp      |  3 ++
+ .../tele/scripting/tele_script_stories.cpp    |  3 +-
+ Telegram/SourceFiles/ui/menu_icons.style      |  1 +
+ 7 files changed, 54 insertions(+), 3 deletions(-)
+
+diff --git a/Telegram/SourceFiles/tele/scripting/tele_script_hooks.cpp b/Telegram/SourceFiles/tele/scripting/tele_script_hooks.cpp
+index d0f131f23fbbf04072fbb37ff183e6f6944c6081..04ca79983c82bbd1f254c2d02662396e53682f72 100644
+--- a/Telegram/SourceFiles/tele/scripting/tele_script_hooks.cpp
++++ b/Telegram/SourceFiles/tele/scripting/tele_script_hooks.cpp
+@@ -74,6 +74,7 @@ constexpr auto kMaxGranted = 256;
+ constexpr auto kMaxEntries = quint32(4096);
+ constexpr auto kMaxIdLength = 1024;
+ constexpr auto kRefreshDelay = crl::time(300);
++constexpr auto kPollInterval = crl::time(2000);
+ constexpr auto kToastMerge = crl::time(5000);
+ constexpr auto kMaxPending = 4096;
+ constexpr auto kRpcErrorId = std::uint32_t(0x2144ca19U);
+@@ -754,6 +755,7 @@ public:
+ 	explicit Host(not_null<Main::Session*> session);
+ 	~Host();
+ 
++	void rescan();
+ 	[[nodiscard]] static Host *Find(not_null<MTP::Instance*> instance);
+ 	[[nodiscard]] static Host *Find(not_null<Main::Session*> session);
+ 	static void RefreshAll();
+@@ -946,6 +948,7 @@ private:
+ 
+ 	void refresh();
+ 	void scheduleRefresh();
++	void poll();
+ 	void watch(const std::vector<ScriptFile> &files);
+ 	void start(Entry &entry, bool interactive);
+ 	void notify(const QString &id, const QString &text);
+@@ -1018,6 +1021,7 @@ private:
+ 	MTP::Sender _api;
+ 	std::unique_ptr<QFileSystemWatcher> _watcher;
+ 	base::Timer _refreshTimer;
++	base::Timer _pollTimer;
+ 	rpl::event_stream<> _changes;
+ 	rpl::event_stream<ScriptLogged> _logged;
+ 	std::unique_ptr<Instance> _repl;
+@@ -1031,13 +1035,15 @@ Host::Host(not_null<Main::Session*> session)
+ , _mtp(&session->mtp())
+ , _storage(session)
+ , _api(&session->mtp())
+-, _refreshTimer([=] { refresh(); }) {
++, _refreshTimer([=] { refresh(); })
++, _pollTimer([=] { poll(); }) {
+ 	Registry().emplace(_mtp, this);
+ 	read();
+ 	Folder().changes.events() | rpl::on_next([=] {
+ 		refresh();
+ 	}, _lifetime);
+ 	refresh();
++	_pollTimer.callEach(kPollInterval);
+ }
+ 
+ Host::~Host() {
+@@ -1172,6 +1178,33 @@ void Host::scheduleRefresh() {
+ 	_refreshTimer.callOnce(kRefreshDelay);
+ }
+ 
++void Host::rescan() {
++	_refreshTimer.cancel();
++	refresh();
++}
++
++void Host::poll() {
++	if (_refreshTimer.isActive()) {
++		return;
++	}
++	const auto files = Scan(ScriptsFolder());
++	auto same = (files.size() == _entries.size());
++	for (auto i = 0; same && i != int(files.size()); ++i) {
++		same = (files[i].id == _entries[i].file.id)
++			&& (files[i].entry == _entries[i].file.entry);
++	}
++	if (!same) {
++		scheduleRefresh();
++		return;
++	}
++	for (const auto &entry : _entries) {
++		if (entry.instance && Changed(entry.stamps)) {
++			scheduleRefresh();
++			return;
++		}
++	}
++}
++
+ void Host::watch(const std::vector<ScriptFile> &files) {
+ 	_watcher = nullptr;
+ 	const auto folder = ScriptsFolder();
+@@ -3080,6 +3113,12 @@ void ClearScriptLog(not_null<Main::Session*> session, const QString &id) {
+ 	}
+ }
+ 
++void RescanScripts(not_null<Main::Session*> session) {
++	if (const auto host = Host::Find(session)) {
++		host->rescan();
++	}
++}
++
+ void ReloadScript(not_null<Main::Session*> session, const QString &id) {
+ 	if (const auto host = Host::Find(session)) {
+ 		host->reload(id);
+diff --git a/Telegram/SourceFiles/tele/scripting/tele_script_hooks.h b/Telegram/SourceFiles/tele/scripting/tele_script_hooks.h
+index 272ab6e83d9727b6bd4caa00a79cf0d9a7c7fc31..ded448b9987dea048c84c57f5107e05a11aa504e 100644
+--- a/Telegram/SourceFiles/tele/scripting/tele_script_hooks.h
++++ b/Telegram/SourceFiles/tele/scripting/tele_script_hooks.h
+@@ -288,6 +288,7 @@ void ClearScriptLog(not_null<Main::Session*> session, const QString &id);
+ 	const QByteArray &payload,
+ 	const QString &target);
+ void ReloadScript(not_null<Main::Session*> session, const QString &id);
++void RescanScripts(not_null<Main::Session*> session);
+ void EvaluateInScript(
+ 	not_null<Main::Session*> session,
+ 	const QString &target,
+diff --git a/Telegram/SourceFiles/tele/scripting/tele_script_manager.cpp b/Telegram/SourceFiles/tele/scripting/tele_script_manager.cpp
+index a0f8399d30004a832502ea474ea4c0804a2e1fd9..6a8d275107ea1e470270c3e25f5c47cb1b1b6eb0 100644
+--- a/Telegram/SourceFiles/tele/scripting/tele_script_manager.cpp
++++ b/Telegram/SourceFiles/tele/scripting/tele_script_manager.cpp
+@@ -898,6 +898,10 @@ void FillMenu(
+ 		PrepareScriptsFolder();
+ 		QDesktopServices::openUrl(QUrl::fromLocalFile(ScriptsFolder()));
+ 	}, &st::menuIconShowInFolder);
++	add(Lower(u"Rescan the scripts folder"_q), [=] {
++		RescanScripts(manager->session);
++		Toast(manager, Lower(u"Rescanned the scripts folder."_q));
++	}, &st::menuIconRestore);
+ 	add(Lower(u"Change the folder"_q), [=] {
+ 		FileDialog::GetFolder(
+ 			manager->panel.get(),
+@@ -1771,6 +1775,7 @@ void ShowLog(std::shared_ptr<Manager> manager, const QString &id) {
+ void ShowScriptsManager(not_null<Window::SessionController*> controller) {
+ 	const auto session = &controller->session();
+ 	CheckScriptUpdates();
++	RescanScripts(session);
+ 	auto &panels = Panels();
+ 	if (const auto i = panels.find(session); i != end(panels)) {
+ 		const auto panel = i->second.panel.get();
+diff --git a/Telegram/SourceFiles/tele/scripting/tele_script_mediaviewer.cpp b/Telegram/SourceFiles/tele/scripting/tele_script_mediaviewer.cpp
+index 36d367465f6e71a36dae9df35fc48a564c664170..3fb437da19cbceddc0bf089172acc822a6138c04 100644
+--- a/Telegram/SourceFiles/tele/scripting/tele_script_mediaviewer.cpp
++++ b/Telegram/SourceFiles/tele/scripting/tele_script_mediaviewer.cpp
+@@ -15,6 +15,7 @@
+ #include "main/main_session.h"
+ #include "ui/widgets/menu/menu_add_action_callback.h"
+ #include "window/window_session_controller.h"
++#include "styles/style_menu_icons.h"
+ 
+ namespace Tele::Scripting {
+ namespace {
+@@ -644,7 +645,7 @@ void AddMediaActions(
+ 			crl::on_main([=] {
+ 				Click(id, shown);
+ 			});
+-		}, nullptr);
++		}, &st::mediaMenuIconExperimental);
+ 	}
+ }
+ 
+diff --git a/Telegram/SourceFiles/tele/scripting/tele_script_sound.cpp b/Telegram/SourceFiles/tele/scripting/tele_script_sound.cpp
+index 9577f72bf3c55b8f0a5400f6f04ff728be492285..6901d010268e3cf889a3e51d853afc5d3aded7c1 100644
+--- a/Telegram/SourceFiles/tele/scripting/tele_script_sound.cpp
++++ b/Telegram/SourceFiles/tele/scripting/tele_script_sound.cpp
+@@ -196,6 +196,9 @@ struct SoundInfo {
+ 			.id = sound->id,
+ 			.title = ExtractRingtoneName(document),
+ 		};
++	} else if (sound->data.compare(u"default"_q, Qt::CaseInsensitive) == 0
++		|| sound->title.compare(u"default"_q, Qt::CaseInsensitive) == 0) {
++		return {};
+ 	} else if (!sound->title.isEmpty()) {
+ 		return { .kind = "custom", .title = sound->title };
+ 	}
+diff --git a/Telegram/SourceFiles/tele/scripting/tele_script_stories.cpp b/Telegram/SourceFiles/tele/scripting/tele_script_stories.cpp
+index 0107b973cae55c4693f51c1d2e9214e8c2099c5d..5a81174e32c99d96f480dc4a117380b55ba56015 100644
+--- a/Telegram/SourceFiles/tele/scripting/tele_script_stories.cpp
++++ b/Telegram/SourceFiles/tele/scripting/tele_script_stories.cpp
+@@ -22,6 +22,7 @@
+ #include <cmath>
+ #include <map>
+ #include <memory>
++#include "styles/style_menu_icons.h"
+ 
+ namespace Tele::Scripting {
+ namespace {
+@@ -975,7 +976,7 @@ void AddStoryActions(
+ 					return result;
+ 				}, u"tg.stories.registerStoryAction"_q);
+ 			});
+-		}, nullptr);
++		}, &st::mediaMenuIconExperimental);
+ 	}
+ }
+ 
+diff --git a/Telegram/SourceFiles/ui/menu_icons.style b/Telegram/SourceFiles/ui/menu_icons.style
+index 8e3a7e6d7a341e013f1283ccd095d4e1e1f72824..9ad5b0044c77eb788dc4fecfe52050fa695318d6 100644
+--- a/Telegram/SourceFiles/ui/menu_icons.style
++++ b/Telegram/SourceFiles/ui/menu_icons.style
+@@ -259,6 +259,7 @@ mediaMenuIconRetractVote: icon {{ "menu/retract_vote", mediaviewMenuFg }};
+ mediaMenuIconStar: icon {{ "menu/star", mediaviewMenuFg }};
+ 
+ mediaMenuIconInfo: icon {{ "menu/info", mediaviewMenuFg }};
++mediaMenuIconExperimental: icon {{ "menu/experimental", mediaviewMenuFg }};
+ mediaMenuIconBlock: icon {{ "menu/block", mediaviewMenuFg }};
+ 
+ mediaMenuIconFlip: icon {{ "menu/flip", mediaviewMenuFg }};

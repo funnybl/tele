@@ -929,7 +929,8 @@ the Scripts manager is tele's panel for scripts: a separate resizable window per
   - the status line shows, in order: "Waiting for your approval", the start error (red), "Update available: {version}" (accent color), the description, "Running", "Starting" or "Off".
   - opening the manager checks every link-installed script for updates (at most once a minute per script); see [updates for link-installed scripts](#updates-for-link-installed-scripts).
   - clicking a row opens the [script page](#the-script-page).
-  - the ⋮ menu: Install from a file, Install from a link, Open the scripts folder, Change the folder, Use the default folder (only when changed), MTProto console.
+  - the ⋮ menu: Install from a file, Install from a link, Open the scripts folder, Rescan the scripts folder, Change the folder, Use the default folder (only when changed), MTProto console.
+  - new, removed and renamed scripts show up on their own: tele watches the folder and also checks it every 2 seconds (for folders where change notifications don't arrive, like network drives or some sync tools), and rescans whenever the manager opens. Rescan the scripts folder does it at once.
 
 Example:
 
