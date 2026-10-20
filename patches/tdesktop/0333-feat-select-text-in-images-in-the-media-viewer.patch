@@ -1,0 +1,610 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: xd <126738676+funnybl@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 00:15:20 +0200
+Subject: [PATCH] feat: select text in images in the media viewer
+
+---
+ Telegram/CMakeLists.txt                       |   4 +
+ .../media/view/media_view_overlay_widget.cpp  |  11 +-
+ .../SourceFiles/settings/settings_tele.cpp    |   4 +
+ Telegram/SourceFiles/tele/tele_image_ocr.cpp  | 254 ++++++++++++++++++
+ Telegram/SourceFiles/tele/tele_image_ocr.h    |  12 +
+ Telegram/SourceFiles/tele/tele_options.cpp    |  11 +
+ Telegram/SourceFiles/tele/tele_options.h      |   2 +
+ .../SourceFiles/tele/tele_settings_io.cpp     |   1 +
+ Telegram/cmake/tele_image_ocr.cmake           | 144 ++++++++++
+ 9 files changed, 438 insertions(+), 5 deletions(-)
+ create mode 100644 Telegram/SourceFiles/tele/tele_image_ocr.cpp
+ create mode 100644 Telegram/SourceFiles/tele/tele_image_ocr.h
+ create mode 100644 Telegram/cmake/tele_image_ocr.cmake
+
+diff --git a/Telegram/CMakeLists.txt b/Telegram/CMakeLists.txt
+index 97aa2d25f57f2dd33b24f4c637bc6f6ab4fd7c4f..773b254a364086a1ffac4adbf2a465859a2af82e 100644
+--- a/Telegram/CMakeLists.txt
++++ b/Telegram/CMakeLists.txt
+@@ -31,6 +31,8 @@ include(cmake/lib_tgcalls.cmake)
+ include(cmake/lib_prisma.cmake)
+ include(cmake/lib_quickjs.cmake)
+ include(cmake/tele_html.cmake)
++include(cmake/tele_image_ocr.cmake)
++tele_add_image_ocr(Telegram)
+ include(cmake/lib_fido2.cmake)
+ include(cmake/lib_zxcvbn.cmake)
+ include(cmake/td_export.cmake)
+@@ -2670,6 +2672,8 @@ PRIVATE
+     tele/tele_ghost_pending.h
+     tele/tele_hidden_words.cpp
+     tele/tele_hidden_words.h
++    tele/tele_image_ocr.cpp
++    tele/tele_image_ocr.h
+     tele/tele_html.cpp
+     tele/tele_html.h
+     tele/tele_html_card.cpp
+diff --git a/Telegram/SourceFiles/media/view/media_view_overlay_widget.cpp b/Telegram/SourceFiles/media/view/media_view_overlay_widget.cpp
+index b3b9c40c8d98f33856e6cce2e9b8b1cf76655d2e..bbbdde4fc6f18f6005ce70975849004404863bec 100644
+--- a/Telegram/SourceFiles/media/view/media_view_overlay_widget.cpp
++++ b/Telegram/SourceFiles/media/view/media_view_overlay_widget.cpp
+@@ -121,6 +121,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ #include "tele/scripting/tele_script_mediaviewer.h"
+ #include "tele/scripting/tele_script_stories.h"
+ #include "tele/tele_download_folders.h"
++#include "tele/tele_image_ocr.h"
+ #include "tele/tele_invisible_stories.h"
+ #include "tele/tele_lowercase.h"
+ #include "tele/tele_options.h"
+@@ -162,7 +163,7 @@ using RecognitionResult = Platform::TextRecognition::Result;
+ using RecognitionCacheMap = base::flat_map<RecognitionId, RecognitionResult>;
+ 
+ [[nodiscard]] RecognitionCacheMap *RecognitionCache() {
+-	static auto cache = Platform::TextRecognition::IsAvailable()
++	static auto cache = Tele::ImageOcrSupported()
+ 		? std::make_unique<base::flat_map<RecognitionId, RecognitionResult>>()
+ 		: nullptr;
+ 	return cache.get();
+@@ -4681,7 +4682,7 @@ void OverlayWidget::displayPhoto(
+ 	_rotation = _photo->owner().mediaRotation().get(_photo);
+ 	_radial.stop();
+ 	if (photoChanged) {
+-		_showRecognitionResults = false;
++		_showRecognitionResults = Tele::ImageTextSelection();
+ 		_recognitionResult = {};
+ 		_recognitionPendingSessionUniqueId = 0;
+ 		_recognitionPendingPhotoId = 0;
+@@ -4777,7 +4778,7 @@ void OverlayWidget::displayDocument(
+ 	_themeCloudData = cloud;
+ 	_radial.stop();
+ 	if (documentChanged) {
+-		_showRecognitionResults = false;
++		_showRecognitionResults = Tele::ImageTextSelection();
+ 		_recognitionResult = {};
+ 		_recognitionPendingSessionUniqueId = 0;
+ 		_recognitionPendingPhotoId = 0;
+@@ -6336,7 +6337,7 @@ void OverlayWidget::validatePhotoCurrentImage() {
+ void OverlayWidget::tryStartTextRecognition() {
+ 	if (_stories
+ 		|| !_session
+-		|| !Platform::TextRecognition::IsAvailable()) {
++		|| !Tele::ImageOcrAvailable()) {
+ 		return;
+ 	}
+ 	const auto forPhoto = (_photo != nullptr) && (_photoMedia != nullptr);
+@@ -6406,7 +6407,7 @@ void OverlayWidget::tryStartTextRecognition() {
+ 				recognizeSize,
+ 				Qt::IgnoreAspectRatio,
+ 				Qt::SmoothTransformation);
+-		auto result = Platform::TextRecognition::RecognizeText(input);
++		auto result = Tele::RecognizeImageText(input);
+ 		crl::on_main(weak, [=, result = std::move(result)]() mutable {
+ 			const auto cache = RecognitionCache();
+ 			if (!cache) {
+diff --git a/Telegram/SourceFiles/settings/settings_tele.cpp b/Telegram/SourceFiles/settings/settings_tele.cpp
+index 5402d7b278c10a809cd2580cf3a1688d2e50274f..5e1ac704470320fd156bf2b38ece050ecc46a2ed 100644
+--- a/Telegram/SourceFiles/settings/settings_tele.cpp
++++ b/Telegram/SourceFiles/settings/settings_tele.cpp
+@@ -2803,6 +2803,10 @@ void FillInterface(SectionBuilder &builder) {
+ 		builder,
+ 		::Tele::kOptionViewerMouseBack,
+ 		{ u"mouse 4"_q, u"side button"_q, u"photo"_q, u"video"_q });
++	AddOptionToggle(
++		builder,
++		::Tele::kOptionImageTextSelection,
++		{ u"ocr"_q, u"photo"_q, u"copy"_q, u"scan"_q, u"live text"_q });
+ 	AddGroupDivider(builder);
+ 	AddGroupTitle(builder, u"Chat list"_q);
+ 	AddOptionToggle(builder, ::Tele::kOptionHideAllChats);
+diff --git a/Telegram/SourceFiles/tele/tele_image_ocr.cpp b/Telegram/SourceFiles/tele/tele_image_ocr.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..4035753e46d943d80d4632f5508922a70bd715c8
+--- /dev/null
++++ b/Telegram/SourceFiles/tele/tele_image_ocr.cpp
+@@ -0,0 +1,254 @@
++#include "tele/tele_image_ocr.h"
++
++#include "tele/tele_options.h"
++#include "ui/style/style_core.h"
++
++#ifndef Q_OS_MAC
++#include <tesseract/capi.h>
++#include <QFile>
++#include <QPainter>
++#include <mutex>
++#endif
++
++namespace Tele {
++namespace {
++
++#ifndef Q_OS_MAC
++
++constexpr auto kMaxImageDimension = 4096;
++constexpr auto kRecognitionDeadline = 10000;
++constexpr auto kMaxWords = 10000;
++
++using EnginePointer = std::unique_ptr<
++	TessBaseAPI,
++	decltype(&TessBaseAPIDelete)>;
++using IteratorPointer = std::unique_ptr<
++	TessResultIterator,
++	decltype(&TessResultIteratorDelete)>;
++using MonitorPointer = std::unique_ptr<
++	ETEXT_DESC,
++	decltype(&TessMonitorDelete)>;
++
++[[nodiscard]] TessBaseAPI *ImageOcrEngine() {
++	static const auto model = [] {
++		auto file = QFile(u":/tele/ocr/eng.traineddata"_q);
++		return file.open(QIODevice::ReadOnly)
++			? file.readAll()
++			: QByteArray();
++	}();
++	static const auto engine = [] {
++		auto result = EnginePointer(
++			TessBaseAPICreate(),
++			&TessBaseAPIDelete);
++		if (result && !model.isEmpty()) {
++			const auto initialized = TessBaseAPIInit5(
++				result.get(),
++				model.constData(),
++				int(model.size()),
++				"eng",
++				tesseract::OEM_LSTM_ONLY,
++				nullptr,
++				0,
++				nullptr,
++				nullptr,
++				0,
++				false);
++			if (!initialized) {
++				TessBaseAPISetPageSegMode(
++					result.get(),
++					tesseract::PSM_SPARSE_TEXT);
++				return result;
++			}
++		}
++		result.reset();
++		return result;
++	}();
++	return engine.get();
++}
++
++[[nodiscard]] QString RecognizedText(
++		const TessResultIterator *iterator,
++		TessPageIteratorLevel level) {
++	const auto text = std::unique_ptr<const char, decltype(&TessDeleteText)>(
++		TessResultIteratorGetUTF8Text(iterator, level),
++		&TessDeleteText);
++	return text ? QString::fromUtf8(text.get()) : QString();
++}
++
++[[nodiscard]] QRect RecognizedBox(
++		const TessPageIterator *iterator,
++		TessPageIteratorLevel level,
++		double scaleX,
++		double scaleY) {
++	auto left = 0;
++	auto top = 0;
++	auto right = 0;
++	auto bottom = 0;
++	if (!TessPageIteratorBoundingBox(
++			iterator,
++			level,
++			&left,
++			&top,
++			&right,
++			&bottom)
++		|| right <= left
++		|| bottom <= top) {
++		return {};
++	}
++	return QRect(
++		int(style::ConvertScale(left * scaleX)),
++		int(style::ConvertScale(top * scaleY)),
++		std::max(1, int(style::ConvertScale((right - left) * scaleX))),
++		std::max(1, int(style::ConvertScale((bottom - top) * scaleY))));
++}
++
++[[nodiscard]] std::vector<QRect> RecognizedGlyphs(
++		const TessResultIterator *word,
++		const QString &text,
++		double scaleX,
++		double scaleY) {
++	auto symbols = IteratorPointer(
++		TessResultIteratorCopy(word),
++		&TessResultIteratorDelete);
++	if (!symbols) {
++		return {};
++	}
++	const auto page = TessResultIteratorGetPageIteratorConst(symbols.get());
++	auto result = std::vector<QRect>();
++	result.reserve(text.size());
++	auto recognized = QString();
++	do {
++		const auto symbol = RecognizedText(symbols.get(), tesseract::RIL_SYMBOL);
++		const auto box = RecognizedBox(
++			page,
++			tesseract::RIL_SYMBOL,
++			scaleX,
++			scaleY);
++		if (symbol.isEmpty() || box.isEmpty()) {
++			return {};
++		}
++		recognized += symbol;
++		if (recognized.size() > text.size()) {
++			return {};
++		}
++		result.insert(result.end(), symbol.size(), box);
++		if (TessPageIteratorIsAtFinalElement(
++				page,
++				tesseract::RIL_WORD,
++				tesseract::RIL_SYMBOL)) {
++			break;
++		}
++	} while (TessResultIteratorNext(symbols.get(), tesseract::RIL_SYMBOL));
++	return (recognized == text) ? result : std::vector<QRect>();
++}
++
++[[nodiscard]] Platform::TextRecognition::Result RecognizeBundledImageText(
++		const QImage &image) {
++	if (image.isNull()) {
++		return {};
++	}
++	static auto mutex = std::mutex();
++	const auto lock = std::lock_guard(mutex);
++	const auto engine = ImageOcrEngine();
++	if (!engine) {
++		return {};
++	}
++	const auto clear = gsl::finally([=] {
++		TessBaseAPIClear(engine);
++	});
++	auto input = (std::max(image.width(), image.height()) > kMaxImageDimension)
++		? image.scaled(
++			kMaxImageDimension,
++			kMaxImageDimension,
++			Qt::KeepAspectRatio,
++			Qt::SmoothTransformation)
++		: image;
++	if (input.isNull()) {
++		return {};
++	}
++	input.setDevicePixelRatio(1.);
++	if (input.hasAlphaChannel()) {
++		auto flattened = QImage(input.size(), QImage::Format_RGB32);
++		if (flattened.isNull()) {
++			return {};
++		}
++		flattened.fill(Qt::white);
++		{
++			auto painter = QPainter(&flattened);
++			painter.drawImage(QPoint(), input);
++		}
++		input = std::move(flattened);
++	}
++	input = input.convertToFormat(QImage::Format_Grayscale8);
++	if (input.isNull()) {
++		return {};
++	}
++	TessBaseAPISetImage(
++		engine,
++		input.constBits(),
++		input.width(),
++		input.height(),
++		1,
++		int(input.bytesPerLine()));
++	TessBaseAPISetSourceResolution(engine, 300);
++	auto monitor = MonitorPointer(TessMonitorCreate(), &TessMonitorDelete);
++	if (!monitor) {
++		return {};
++	}
++	TessMonitorSetDeadlineMSecs(monitor.get(), kRecognitionDeadline);
++	if (TessBaseAPIRecognize(engine, monitor.get())) {
++		return {};
++	}
++	auto result = Platform::TextRecognition::Result{ .success = true };
++	auto words = IteratorPointer(
++		TessBaseAPIGetIterator(engine),
++		&TessResultIteratorDelete);
++	if (!words) {
++		return result;
++	}
++	const auto page = TessResultIteratorGetPageIteratorConst(words.get());
++	const auto scaleX = double(image.width()) / input.width();
++	const auto scaleY = double(image.height()) / input.height();
++	do {
++		auto text = RecognizedText(words.get(), tesseract::RIL_WORD);
++		const auto box = RecognizedBox(page, tesseract::RIL_WORD, scaleX, scaleY);
++		if (text.isEmpty() || box.isEmpty()) {
++			continue;
++		}
++		auto glyphs = RecognizedGlyphs(words.get(), text, scaleX, scaleY);
++		result.items.push_back({
++			std::move(text),
++			box,
++			std::move(glyphs),
++		});
++	} while (result.items.size() < kMaxWords
++		&& TessResultIteratorNext(words.get(), tesseract::RIL_WORD));
++	return result;
++}
++
++#endif
++
++}
++
++bool ImageOcrSupported() {
++#ifdef Q_OS_MAC
++	return Platform::TextRecognition::IsAvailable();
++#else
++	return true;
++#endif
++}
++
++bool ImageOcrAvailable() {
++	return Platform::TextRecognition::IsAvailable()
++		|| (ImageTextSelection() && ImageOcrSupported());
++}
++
++Platform::TextRecognition::Result RecognizeImageText(const QImage &image) {
++#ifdef Q_OS_MAC
++	return Platform::TextRecognition::RecognizeText(image);
++#else
++	return RecognizeBundledImageText(image);
++#endif
++}
++
++}
+diff --git a/Telegram/SourceFiles/tele/tele_image_ocr.h b/Telegram/SourceFiles/tele/tele_image_ocr.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..59eceb534842f3812fe87620400fcbb4d407fc94
+--- /dev/null
++++ b/Telegram/SourceFiles/tele/tele_image_ocr.h
+@@ -0,0 +1,12 @@
++#pragma once
++
++#include "platform/platform_text_recognition.h"
++
++namespace Tele {
++
++[[nodiscard]] bool ImageOcrSupported();
++[[nodiscard]] bool ImageOcrAvailable();
++[[nodiscard]] Platform::TextRecognition::Result RecognizeImageText(
++	const QImage &image);
++
++}
+diff --git a/Telegram/SourceFiles/tele/tele_options.cpp b/Telegram/SourceFiles/tele/tele_options.cpp
+index b4b8b4fc6d89c6f0a85fd7e318b5ad6dfee7c6e0..d6711f85a86428da1de771b504dd34bef5d76552 100644
+--- a/Telegram/SourceFiles/tele/tele_options.cpp
++++ b/Telegram/SourceFiles/tele/tele_options.cpp
+@@ -69,6 +69,7 @@ const char kOptionSmoothScroll[] = "tele-smooth-scroll";
+ const char kOptionScrollStats[] = "tele-scroll-stats";
+ const char kOptionScrollZoom[] = "tele-scroll-zoom";
+ const char kOptionViewerMouseBack[] = "tele-viewer-mouse-back";
++const char kOptionImageTextSelection[] = "tele-image-text-selection";
+ const char kOptionStaticUserpicsChats[] = "tele-static-userpics-chats";
+ const char kOptionHideMentionsButton[] = "tele-hide-mentions-button";
+ const char kOptionHideReactionsButton[] = "tele-hide-reactions-button";
+@@ -667,6 +668,12 @@ base::options::toggle ViewerMouseBackOption({
+ 	.name = "Close the media viewer with mouse back",
+ });
+ 
++base::options::toggle ImageTextSelectionOption({
++	.id = kOptionImageTextSelection,
++	.name = "Select text in images",
++	.description = "Recognition runs locally, with English supported on Windows and Linux.",
++});
++
+ base::options::toggle StaticUserpicsChatsOption({
+ 	.id = kOptionStaticUserpicsChats,
+ 	.name = "Static userpics in chats and profiles",
+@@ -3670,6 +3677,10 @@ bool ViewerMouseBack() {
+ 	return ViewerMouseBackOption.value();
+ }
+ 
++bool ImageTextSelection() {
++	return ImageTextSelectionOption.value();
++}
++
+ void SetViewerLoop(bool enabled) {
+ 	ViewerLoopOption.set(enabled);
+ }
+diff --git a/Telegram/SourceFiles/tele/tele_options.h b/Telegram/SourceFiles/tele/tele_options.h
+index 606f99fe8fa9b42b203e5bfabc76be1602601c8d..57a85261310ed1931e6d283b0229d7643c0fc084 100644
+--- a/Telegram/SourceFiles/tele/tele_options.h
++++ b/Telegram/SourceFiles/tele/tele_options.h
+@@ -63,6 +63,7 @@ extern const char kOptionSmoothScroll[];
+ extern const char kOptionScrollStats[];
+ extern const char kOptionScrollZoom[];
+ extern const char kOptionViewerMouseBack[];
++extern const char kOptionImageTextSelection[];
+ extern const char kOptionGhostInMenu[];
+ extern const char kOptionStaticUserpicsChats[];
+ extern const char kOptionHideMentionsButton[];
+@@ -355,6 +356,7 @@ void SetReduceMotionSaved(const QString &value);
+ [[nodiscard]] bool ScrollStats();
+ [[nodiscard]] bool ScrollZoom();
+ [[nodiscard]] bool ViewerMouseBack();
++[[nodiscard]] bool ImageTextSelection();
+ [[nodiscard]] bool StaticUserpicsChats();
+ [[nodiscard]] rpl::producer<> StaticUserpicsChatsChanges();
+ [[nodiscard]] bool HideMentionsButton();
+diff --git a/Telegram/SourceFiles/tele/tele_settings_io.cpp b/Telegram/SourceFiles/tele/tele_settings_io.cpp
+index 72b3093bbf12f75daef6fdf5d6ce2f307734cf0b..b1a7be0165ccf320716c5e1e9283480c69623409 100644
+--- a/Telegram/SourceFiles/tele/tele_settings_io.cpp
++++ b/Telegram/SourceFiles/tele/tele_settings_io.cpp
+@@ -153,6 +153,7 @@ struct Spec {
+ 		Toggle(kOptionScrollStats),
+ 		Toggle(kOptionScrollZoom),
+ 		Toggle(kOptionViewerMouseBack),
++		Toggle(kOptionImageTextSelection),
+ 		Toggle(kOptionLocalFolders),
+ 		Toggle(kOptionUnsortedFolder),
+ 		Toggle(kOptionCompactFolders),
+diff --git a/Telegram/cmake/tele_image_ocr.cmake b/Telegram/cmake/tele_image_ocr.cmake
+new file mode 100644
+index 0000000000000000000000000000000000000000..8995b1a879ffeaa7ae605d43392c52a9fa1985be
+--- /dev/null
++++ b/Telegram/cmake/tele_image_ocr.cmake
+@@ -0,0 +1,144 @@
++include(FetchContent)
++
++function(tele_add_image_ocr target_name)
++    if (APPLE)
++        return()
++    endif()
++
++    set(CMAKE_POLICY_VERSION_MINIMUM 3.13)
++    set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
++    set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
++    set(CMAKE_SKIP_INSTALL_RULES TRUE)
++    if (POLICY CMP0218)
++        cmake_policy(SET CMP0218 NEW)
++        set(CMAKE_POLICY_DEFAULT_CMP0218 NEW)
++        cmake_diagnostic(SET CMD_AUTHOR IGNORE RECURSE)
++    else()
++        foreach(setting
++            CMAKE_ERROR_DEPRECATED
++            CMAKE_WARN_DEPRECATED
++            CMAKE_SUPPRESS_DEVELOPER_ERRORS
++            CMAKE_SUPPRESS_DEVELOPER_WARNINGS)
++            if (DEFINED CACHE{${setting}})
++                set(saved_${setting} "$CACHE{${setting}}")
++                set(had_${setting} TRUE)
++            else()
++                set(had_${setting} FALSE)
++            endif()
++        endforeach()
++        set(CMAKE_ERROR_DEPRECATED FALSE CACHE INTERNAL "" FORCE)
++        set(CMAKE_WARN_DEPRECATED FALSE CACHE INTERNAL "" FORCE)
++        set(CMAKE_SUPPRESS_DEVELOPER_ERRORS TRUE CACHE INTERNAL "" FORCE)
++        set(CMAKE_SUPPRESS_DEVELOPER_WARNINGS TRUE CACHE INTERNAL "" FORCE)
++    endif()
++    set(BUILD_SHARED_LIBS OFF)
++    set(SW_BUILD OFF)
++    set(BUILD_PROG OFF)
++    set(BUILD_TRAINING_TOOLS OFF)
++    set(BUILD_TESTS OFF)
++    set(OPENMP_BUILD OFF)
++    set(GRAPHICS_DISABLED ON)
++    set(DISABLED_LEGACY_ENGINE ON)
++    set(ENABLE_NATIVE OFF)
++    set(DISABLE_TIFF ON)
++    set(DISABLE_ARCHIVE ON)
++    set(DISABLE_CURL ON)
++    set(INSTALL_CONFIGS OFF)
++    foreach(codec ZLIB PNG GIF JPEG TIFF WEBP OPENJPEG)
++        set(ENABLE_${codec} OFF)
++        set(${codec}_FOUND OFF)
++        set(${codec}_LIBRARIES "")
++        set(HAVE_LIB${codec} OFF)
++    endforeach()
++    set(OPENJPEG_SUPPORT OFF)
++    set(LIBWEBP_SUPPORT OFF)
++    set(HAVE_LIBJP2K OFF)
++    set(HAVE_LIBWEBP_ANIM OFF)
++    set(HAVE_LIBZ OFF)
++    set(WebP_LIBRARIES "")
++    set(LibArchive_FOUND OFF)
++    set(CURL_FOUND OFF)
++    set(OpenMP_CXX_FOUND OFF)
++
++    FetchContent_Declare(Leptonica
++        URL https://codeload.github.com/DanBloomberg/leptonica/tar.gz/refs/tags/1.85.0
++        URL_HASH SHA256=c01376bce0379d4ea4bc2ec5d5cbddaa49e2f06f88242619ab8c059e21adf233
++        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
++        OVERRIDE_FIND_PACKAGE
++    )
++    FetchContent_MakeAvailable(Leptonica)
++    file(WRITE "${CMAKE_FIND_PACKAGE_REDIRECTS_DIR}/leptonica-extra.cmake"
++        "set(Leptonica_VERSION 1.85.0)\n"
++        "set(Leptonica_INCLUDE_DIRS \"${leptonica_SOURCE_DIR}/src;${leptonica_BINARY_DIR}/src\")\n"
++        "set(Leptonica_LIBRARIES leptonica)\n"
++    )
++
++    FetchContent_Declare(tele_tesseract
++        URL https://codeload.github.com/tesseract-ocr/tesseract/tar.gz/refs/tags/5.5.1
++        URL_HASH SHA256=a7a3f2a7420cb6a6a94d80c24163e183cf1d2f1bed2df3bbc397c81808a57237
++        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
++    )
++    FetchContent_MakeAvailable(tele_tesseract)
++    if (NOT POLICY CMP0218)
++        foreach(setting
++            CMAKE_ERROR_DEPRECATED
++            CMAKE_WARN_DEPRECATED
++            CMAKE_SUPPRESS_DEVELOPER_ERRORS
++            CMAKE_SUPPRESS_DEVELOPER_WARNINGS)
++            if (had_${setting})
++                set(${setting} "${saved_${setting}}" CACHE INTERNAL "" FORCE)
++            else()
++                unset(${setting} CACHE)
++            endif()
++        endforeach()
++    endif()
++    set_target_properties(leptonica libtesseract PROPERTIES POSITION_INDEPENDENT_CODE ON)
++    set_target_properties(tesseract PROPERTIES EXCLUDE_FROM_ALL TRUE)
++    target_compile_definitions(libtesseract PRIVATE TESSERACT_DISABLE_DEBUG_FONTS)
++    target_include_directories(libtesseract BEFORE PRIVATE "${tele_tesseract_BINARY_DIR}")
++    target_include_directories(libtesseract PUBLIC "$<BUILD_INTERFACE:${tele_tesseract_BINARY_DIR}/include>")
++    target_link_libraries(${target_name} PRIVATE libtesseract)
++
++    set(ocr_dir "${CMAKE_CURRENT_BINARY_DIR}/tele_ocr")
++    file(MAKE_DIRECTORY "${ocr_dir}")
++    tele_download_ocr_file(
++        "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/4.1.0/eng.traineddata"
++        "${ocr_dir}/eng.traineddata"
++        7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2
++    )
++    tele_download_ocr_file(
++        "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/4.1.0/LICENSE"
++        "${ocr_dir}/tessdata-license.txt"
++        cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30
++    )
++    configure_file("${tele_tesseract_SOURCE_DIR}/LICENSE" "${ocr_dir}/tesseract-license.txt" COPYONLY)
++    configure_file("${leptonica_SOURCE_DIR}/leptonica-license.txt" "${ocr_dir}/leptonica-license.txt" COPYONLY)
++    file(WRITE "${ocr_dir}/tele_image_ocr.qrc"
++        "<RCC>\n<qresource prefix=\"/tele/ocr\">\n"
++        "<file>eng.traineddata</file>\n"
++        "<file>tesseract-license.txt</file>\n"
++        "<file>leptonica-license.txt</file>\n"
++        "<file>tessdata-license.txt</file>\n"
++        "</qresource>\n</RCC>\n"
++    )
++    target_sources(${target_name} PRIVATE "${ocr_dir}/tele_image_ocr.qrc")
++endfunction()
++
++function(tele_download_ocr_file url path hash)
++    if (EXISTS "${path}")
++        file(SHA256 "${path}" current_hash)
++        if ("${current_hash}" STREQUAL "${hash}")
++            return()
++        endif()
++    endif()
++    file(DOWNLOAD "${url}" "${path}"
++        EXPECTED_HASH SHA256=${hash}
++        TLS_VERIFY ON
++        STATUS result
++    )
++    list(GET result 0 status)
++    if (NOT status EQUAL 0)
++        list(GET result 1 error)
++        message(FATAL_ERROR "Could not download bundled OCR data: ${error}")
++    endif()
++endfunction()
